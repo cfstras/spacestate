@@ -2,7 +2,7 @@ use std::{io, env};
 use std::net::{UdpSocket, ToSocketAddrs};
 use rand::prelude::*;
 use std::convert::TryInto;
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use std::process::exit;
 
 fn main() {
@@ -67,22 +67,24 @@ impl PingData {
 
 fn send_ping(host: &str, port: i32) -> Result<PingData, io::Error> {
     let target = format!("{}:{}", host, port).to_socket_addrs()?.next().expect("wat?");
-    let mut socket = UdpSocket::bind("0.0.0.0:0")?;
+
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.set_read_timeout(Some(Duration::from_secs(2)))?;
 
     let mut rng = rand::thread_rng();
     // random id as packet id
     let packet_id = rng.gen::<u64>();
-    let ping: Vec<u8> = [&(0u32.to_be_bytes())[..], &(packet_id.to_be_bytes())[..]].concat();
+    let ping = [&(0u32.to_be_bytes())[..], &(packet_id.to_be_bytes())[..]].concat();
 
-    println!("Sending {:?}", ping);
+    //println!("Sending {:?}", ping);
     let start_date = Instant::now();
-    let sent = socket.send_to(&ping, target)?;
-    println!("Sent {} bytes", sent);
+    socket.send_to(&ping, target)?;
+    //println!("Sent {} bytes", sent);
 
     let mut buf = [0; 24];
-    let (num_bytes, src) = socket.recv_from(&mut buf)?;
+    let (num_bytes, _src) = socket.recv_from(&mut buf)?;
     let buf = &mut buf[..num_bytes];
-    println!("Received {} bytes: {:?}", num_bytes, buf);
+    //println!("Received {} bytes: {:?}", num_bytes, buf);
 
     let data = PingData::decode(buf, start_date);
     if data.packet_id != packet_id {
