@@ -1,0 +1,51 @@
+swagger: '2.0'
+info:
+  description: 'This is the spacestate server.'
+  version: 1.0.0
+  title: spacestate
+  license:
+    name: TBD
+    url: 'TBD'
+host: localhost:3000
+tags:
+  - name: mumble
+    description: Information about the mumble server
+basePath: /v1
+schemes:
+  - http
+paths:
+  /mumble/ping:
+    get:
+      tags: [ mumble ]
+      summary: Get the basic ping information for the mumble server
+      description: ''
+      operationId: mumblePing
+      produces:
+        - application/json
+      responses:
+        '200':
+          description: successful
+          schema:
+            $ref: '#/definitions/MumblePing'
+definitions:
+  MumblePing:
+    title: Mumble Ping info
+    description: Basic info, easy to get
+    type: object
+    properties:
+      version:
+        type: string
+      users:
+        type: integer
+        format: int32
+      max_users:
+        type: integer
+        format: int32
+      bandwidth:
+        type: integer
+        format: int32
+        description: Max bandwidth in b/s
+      ping:
+        type: integer
+        format: uint32
+        description: ping in ms
