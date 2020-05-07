@@ -1,9 +1,15 @@
 use std::{io, env};
-use std::net::{UdpSocket, ToSocketAddrs};
+use std::net::{UdpSocket, ToSocketAddrs, TcpStream};
 use rand::prelude::*;
 use std::convert::TryInto;
 use std::time::{Instant, Duration};
 use std::process::exit;
+use std::sync::Arc;
+use rustls::Session;
+
+pub mod mumble {
+    include!(concat!(env!("OUT_DIR"), "/mumble_proto.rs"));
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -26,6 +32,9 @@ fn main() {
             eprintln!("Err: {}", e);
         }
     }
+
+    connect_proto(host, port);
+
 }
 
 #[derive(Debug)]
@@ -92,4 +101,19 @@ fn send_ping(host: &str, port: i32) -> Result<PingData, io::Error> {
     } else {
         Ok(data)
     }
+}
+
+
+fn connect_proto(host: &str, port: i32) -> Result<&str, io::Error> {
+    let mut config = rustls::ClientConfig::new();
+    config.root_store.add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+
+    let rc_config = Arc::new(config);
+    let name_ref = webpki::DNSNameRef::try_from_ascii_str(host).unwrap();
+    let mut client = rustls::ClientSession::new(&rc_config, name_ref);
+
+    let addr = format!("{}:{}", host, port).to_socket_addrs()?.next().expect("wat?");
+    let sock = TcpStream::connect(&addr).unwrap();
+
+    Ok("")
 }
