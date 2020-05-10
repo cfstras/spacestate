@@ -1,11 +1,18 @@
 use std::io;
 use std::convert::TryInto;
 use std::net::{ToSocketAddrs, UdpSocket};
-use std::time::{Duration, Instant};
+use std::time::{Duration};
+use std::cmp;
 
 use rand::prelude::*;
 
+#[cfg(test)]
+use fake_clock::FakeClock as Instant;
+#[cfg(not(test))]
+use std::time::Instant;
+
 #[derive(Debug)]
+#[derive(cmp::PartialEq)]
 pub struct PingData {
     version: [i8; 4],
     packet_id: u64,
@@ -68,5 +75,28 @@ pub fn send_ping(host: &str, port: i32) -> Result<PingData, io::Error> {
         Err(io::Error::new(io::ErrorKind::Other, format!("packet_id was different: {} != {}", packet_id, data.packet_id)))
     } else {
         Ok(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+    use super::PingData;
+
+    const RAW: [u8; 24] = [0, 1, 3, 0, 139, 162, 102, 131, 242, 120, 10, 6, 0, 0, 0, 4, 0, 0, 0, 200, 0, 4, 147, 224];
+
+    #[test]
+    fn test_decode() {
+        let clock = fake_clock::FakeClock::now();
+        fake_clock::FakeClock::advance_time(23);
+        let data = PingData::decode(&RAW, clock);
+        assert_eq!(data, PingData {
+            version: [0, 1, 3, 0],
+            packet_id: 10061717234393811462,
+            users: 4,
+            max_users: 200,
+            bandwidth: 300000,
+            ping: 23
+        })
     }
 }

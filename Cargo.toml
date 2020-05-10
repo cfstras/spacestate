@@ -12,6 +12,7 @@ prost = "0.6"
 rustls = "0.17.0"
 webpki = "0.21.2"
 webpki-roots = "0.19.0"
+fake_clock = "0.3.0"
 
 [build-dependencies]
 prost-build = "0.6"
