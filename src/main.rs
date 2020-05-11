@@ -1,6 +1,6 @@
 use std::{env, io};
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::io::{Read, Write, ErrorKind};
+use std::net::{TcpStream, ToSocketAddrs, Shutdown};
 use std::process::exit;
 use std::sync::Arc;
 
@@ -8,7 +8,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use bytes::buf::BufExt;
 use prost::bytes;
 use prost::Message;
-use rustls::Session;
+use rustls::{Session, ClientSession};
 use std::collections::HashMap;
 
 mod mumble_ping;
@@ -53,11 +53,16 @@ struct State {
 
     channels: HashMap<u32, mumble::ChannelState>,
     users: HashMap<u32, mumble::UserState>,
+
+    server_version: Option<mumble::Version>,
+    suggest_config: Option<mumble::SuggestConfig>,
+    server_sync: Option<mumble::ServerSync>,
+    server_config: Option<mumble::ServerConfig>,
 }
 
 const MAX_MSG_LEN: u32 = 1024 * 1024; // 1 MiB
 
-fn connect_proto(host: &str, port: i32) -> Result<&str, io::Error> {
+fn connect_proto(host: &str, port: i32) -> Result<State, io::Error> {
     let mut config = rustls::ClientConfig::new();
     config.root_store.add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
 
@@ -75,17 +80,10 @@ fn connect_proto(host: &str, port: i32) -> Result<&str, io::Error> {
     let mut read_buf2 = [0; 512];
 
     loop {
-        if client.wants_write() {
-            client.write_tls(&mut sock)?;
-        } else if client.wants_read() {
-            println!("reading");
-            let read = client.read_tls(&mut sock)?;
-            println!("read {}", read);
-            if read == 0 {
-                println!("EOF");
-
-                client.send_close_notify();
-            }
+        if !pull_push_tls(&mut client, &mut sock)? {
+            println!("EOF");
+            close(&mut client, &mut sock)?;
+            return Err(io::Error::new(ErrorKind::Other, "EOF before we got all data"));
         }
         client.process_new_packets()
             .map_err(|f| io::Error::new(io::ErrorKind::Other, f.to_string()))?;
@@ -102,7 +100,30 @@ fn connect_proto(host: &str, port: i32) -> Result<&str, io::Error> {
                 client.write(&answer)?;
             },
         }
+
+        if state.server_config.is_some() && state.server_sync.is_some() {
+            close(&mut client, &mut sock)?;
+            return Ok(state);
+        }
     }
+}
+
+fn close(mut client: &mut ClientSession, mut sock: &mut TcpStream) -> Result<(), io::Error> {
+    client.send_close_notify();
+    pull_push_tls(&mut client, &mut sock)?;
+    sock.shutdown(Shutdown::Both)
+}
+
+fn pull_push_tls(client: &mut ClientSession, mut sock: &mut TcpStream) -> Result<bool, io::Error> {
+    if client.wants_write() {
+        client.write_tls(&mut sock)?;
+    } else if client.wants_read() {
+        let read = client.read_tls(&mut sock)?;
+        if read == 0 {
+            return Ok(false)
+        }
+    }
+    Ok(true)
 }
 
 impl Header {
@@ -119,7 +140,10 @@ impl Header {
 
 impl State {
     fn new() -> State {
-        State {header: None, channels: Default::default(), users: Default::default()}
+        State {
+            header: None, channels: Default::default(), users: Default::default(),
+            server_version: None, suggest_config: None, server_sync: None, server_config: None
+        }
     }
 
     fn run(&mut self, buf: &mut BytesMut) -> Result<Option<BytesMut>, io::Error> {
@@ -157,11 +181,13 @@ impl State {
         let header = self.header.as_ref().unwrap();
         println!("Decoding {:?}", header);
         //println!("Decoding {:?} from {:x?}", header, buf.to_vec());
-        let limited_buf = buf.take(header.message_len as usize);
+        let mut limited_buf = buf.take(header.message_len as usize);
 
         match header.message_type {
             0 => {
-                println!("message: {:#?}", mumble::Version::decode(limited_buf)?);
+                let msg = mumble::Version::decode(limited_buf)?;
+                println!("message: {:#?}", msg);
+                self.server_version = Some(msg);
 
                 let response = mumble::Authenticate {
                     username: Some(String::from("ZiffBot")),
@@ -174,6 +200,13 @@ impl State {
                 let mut resp_buf = State::response_header(&response, 2);
                 response.encode(&mut resp_buf)?;
                 Ok(Some(resp_buf))
+            },
+            1 => {
+                //let msg = mumble::UdpTunnel::decode(limited_buf)?;
+                //println!("message: {:#?}", msg);
+                limited_buf.advance(limited_buf.limit());
+                // ignore, cannot parse this
+                Ok(None)
             },
             2 => {
                 let msg = mumble::Authenticate::decode(limited_buf)?;
@@ -193,6 +226,7 @@ impl State {
             5 => {
                 let msg = mumble::ServerSync::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
+                self.server_sync = Some(msg);
                 Ok(None)
             },
             6 => {
@@ -205,7 +239,7 @@ impl State {
                 //println!("message: Channel {:#?}", &msg.name.clone().unwrap());
                 self.channels.insert(msg.channel_id.unwrap(), msg);
 
-                let response = mumble::Ping {
+                /*let response = mumble::Ping {
                     good: Some(1), late: Some(2), lost: Some(3), resync: Some(4),
                     tcp_packets: Some(5), tcp_ping_avg: Some(6.2f32), tcp_ping_var: Some(7.3f32),
                     timestamp: None,
@@ -214,7 +248,8 @@ impl State {
                 println!("sending answer {:?}", response);
                 let mut resp_buf = State::response_header(&response, 3);
                 response.encode(&mut resp_buf)?;
-                Ok(Some(resp_buf))
+                Ok(Some(resp_buf))*/
+                Ok(None)
             },
             8 => {
                 let msg = mumble::UserRemove::decode(limited_buf)?;
@@ -311,11 +346,13 @@ impl State {
             24 => {
                 let msg = mumble::ServerConfig::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
+                self.server_config = Some(msg);
                 Ok(None)
             },
             25 => {
                 let msg = mumble::SuggestConfig::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
+                self.suggest_config = Some(msg);
                 Ok(None)
             },
             unknown => {
