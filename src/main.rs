@@ -1,20 +1,47 @@
-use std::{env, io};
-use std::io::{Read, Write, ErrorKind};
-use std::net::{TcpStream, ToSocketAddrs, Shutdown};
-use std::process::exit;
-use std::sync::Arc;
+#![feature(proc_macro_hygiene, decl_macro)]
+
+use crate::mumble_ping::PingData;
 
 use bytes::{Buf, BufMut, BytesMut};
 use bytes::buf::BufExt;
 use prost::bytes;
+use prost::encoding::encode_varint;
 use prost::Message;
+use rocket_contrib::json::Json;
+use rocket::State;
 use rustls::{Session, ClientSession};
+use serde::Serialize;
+use std::{env, io};
 use std::collections::HashMap;
+use std::io::{Read, Write, ErrorKind};
+use std::net::{TcpStream, ToSocketAddrs, Shutdown};
+use std::process::exit;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod mumble_ping;
 
+#[macro_use] extern crate rocket;
+
 pub mod mumble {
+    use serde::Serialize;
     include!(concat!(env!("OUT_DIR"), "/mumble_proto.rs"));
+}
+
+#[get("/")]
+fn index() -> &'static str {
+    "Hello, world!"
+}
+
+#[get("/ping")]
+fn ping() -> Json<PingData> {
+    Json(mumble_ping::send_ping("mumble.flipdot.org", 64738)
+        .unwrap())
+}
+
+#[get("/status")]
+fn status(state: State<Box<MumbleState>>) -> Json<&MumbleState> {
+    Json(state.inner().clone().as_ref())
 }
 
 fn main() {
@@ -35,20 +62,31 @@ fn main() {
         Err(e) => eprintln!("Err: {}", e),
     }
 
-    match connect_proto(host, port) {
-        Ok(data) => println!("{:?}", data),
-        Err(e) => eprintln!("Err: {}", e),
-    }
+    let rkt = rocket::ignite()
+        .mount("/", routes![index, status]);
+
+    let res = connect_proto(host, port);
+    let rkt = match res {
+        Ok(data) => {
+            println!("State finished! {} channels, {} users", data.channels.len(), data.users.len());
+            rkt.manage(Box::new(data))
+        }
+        Err(e) => {
+            eprintln!("Err: {}", e);
+            rkt
+        },
+    };
+    rkt.launch();
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct Header {
     message_type: u16,
     message_len: u32,
 }
 
-#[derive(Debug)]
-struct State {
+#[derive(Debug, Serialize)]
+struct MumbleState {
     header: Option<Header>,
 
     channels: HashMap<u32, mumble::ChannelState>,
@@ -62,7 +100,7 @@ struct State {
 
 const MAX_MSG_LEN: u32 = 1024 * 1024; // 1 MiB
 
-fn connect_proto(host: &str, port: i32) -> Result<State, io::Error> {
+fn connect_proto(host: &str, port: i32) -> Result<MumbleState, io::Error> {
     let mut config = rustls::ClientConfig::new();
     config.root_store.add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
 
@@ -74,7 +112,7 @@ fn connect_proto(host: &str, port: i32) -> Result<State, io::Error> {
     let mut sock = TcpStream::connect(&addr).unwrap();
     println!("sock: {:?}", sock);
 
-    let mut state = State::new();
+    let mut state = MumbleState::new();
 
     let mut read_buf = BytesMut::with_capacity(1024);
     let mut read_buf2 = [0; 512];
@@ -138,9 +176,9 @@ impl Header {
     }
 }
 
-impl State {
-    fn new() -> State {
-        State {
+impl MumbleState {
+    fn new() -> MumbleState {
+        MumbleState {
             header: None, channels: Default::default(), users: Default::default(),
             server_version: None, suggest_config: None, server_sync: None, server_config: None
         }
@@ -149,7 +187,7 @@ impl State {
     fn run(&mut self, buf: &mut BytesMut) -> Result<Option<BytesMut>, io::Error> {
         if self.header.is_none() {
             self.header = Header::parse(buf).map(|header| {
-                println!("Parsed header {:?}", header);
+                //println!("Parsed header {:?}", header);
                 header
             });
         }
@@ -179,7 +217,7 @@ impl State {
 
     fn parse_mumble_msg(&mut self, buf: &mut BytesMut) -> Result<Option<BytesMut>, io::Error> {
         let header = self.header.as_ref().unwrap();
-        println!("Decoding {:?}", header);
+        //println!("Decoding {:?}", header);
         //println!("Decoding {:?} from {:x?}", header, buf.to_vec());
         let mut limited_buf = buf.take(header.message_len as usize);
 
@@ -193,17 +231,17 @@ impl State {
                     username: Some(String::from("ZiffBot")),
                     password: None,
                     tokens: [].to_vec(),
-                    celt_versions: [].to_vec(),
-                    opus: None,
+                    celt_versions: [0x0000_0B_00, 0x0000_07_00].to_vec(),
+                    opus: Some(false),
                 };
                 println!("sending answer {:?}", response);
-                let mut resp_buf = State::response_header(&response, 2);
+                let mut resp_buf = MumbleState::response_header(&response, 2);
                 response.encode(&mut resp_buf)?;
                 Ok(Some(resp_buf))
             },
             1 => {
                 //let msg = mumble::UdpTunnel::decode(limited_buf)?;
-                //println!("message: {:#?}", msg);
+                println!("message: UdpTunnel {:x?}", limited_buf.bytes());
                 limited_buf.advance(limited_buf.limit());
                 // ignore, cannot parse this
                 Ok(None)
@@ -299,7 +337,7 @@ impl State {
                     os_version: Some("99.1 Chilly Cheetah".to_string()),
                 };
                 println!("sending answer {:?}", response);
-                let mut resp_buf = State::response_header(&response, 0);
+                let mut resp_buf = MumbleState::response_header(&response, 0);
                 response.encode(&mut resp_buf)?;
                 Ok(Some(resp_buf))
             },

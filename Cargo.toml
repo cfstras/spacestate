@@ -7,13 +7,19 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+# needed by mumble client protocol, but the versions are locked by rocket
+rustls = "*"
+webpki = "*"
+webpki-roots = "*"
+
 rand = "0.7.3"
 prost = "0.6"
-rustls = "0.17.0"
-webpki = "0.21.2"
-webpki-roots = "0.19.0"
 fake_clock = "0.3.0"
 bytes = "0.5.4"
+
+rocket = "0.4.4"
+rocket_contrib = "0.4.4"
+serde = { version = "1.0.110", features = ["derive"] }
 
 [build-dependencies]
 prost-build = "0.6"

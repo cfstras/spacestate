@@ -3,6 +3,7 @@ use std::convert::TryInto;
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::time::{Duration};
 use std::cmp;
+use serde::Serialize;
 
 use rand::prelude::*;
 
@@ -11,15 +12,14 @@ use fake_clock::FakeClock as Instant;
 #[cfg(not(test))]
 use std::time::Instant;
 
-#[derive(Debug)]
-#[derive(cmp::PartialEq)]
+#[derive(Debug, cmp::PartialEq, Serialize)]
 pub struct PingData {
     version: [i8; 4],
     packet_id: u64,
     users: i32,
     max_users: i32,
     bandwidth: i32,
-    ping: u128
+    ping: u64
 }
 
 impl PingData {
@@ -35,7 +35,7 @@ impl PingData {
             users: PingData::parse_i32(&buf[12..]),
             max_users: PingData::parse_i32(&buf[16..]),
             bandwidth: PingData::parse_i32(&buf[20..]),
-            ping: start_date.elapsed().as_millis(),
+            ping: start_date.elapsed().as_millis() as u64,
         }
     }
     fn parse_u8(arr: &[u8]) -> i8 {
