@@ -59,7 +59,7 @@ fn main() {
 
     match mumble_ping::send_ping(host, port) {
         Ok(data) => println!("{:?}", data),
-        Err(e) => eprintln!("Err: {}", e),
+        Err(e) => eprintln!("Ping Err: {}", e),
     }
 
     let rkt = rocket::ignite()
@@ -72,7 +72,7 @@ fn main() {
             rkt.manage(Box::new(data))
         }
         Err(e) => {
-            eprintln!("Err: {}", e);
+            eprintln!("Read state err: {}", e);
             rkt
         },
     };
@@ -98,18 +98,54 @@ struct MumbleState {
     server_config: Option<mumble::ServerConfig>,
 }
 
+struct AcceptAllCertsVerifier {}
+impl rustls::ServerCertVerifier for AcceptAllCertsVerifier {
+    fn verify_server_cert(
+        &self,
+        _: &rustls::RootCertStore,
+        _: &[rustls::Certificate],
+        _: webpki::DNSNameRef,
+        _: &[u8],
+    ) -> Result<rustls::ServerCertVerified, rustls::TLSError> {
+        return Ok(rustls::ServerCertVerified::assertion());
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::Certificate,
+        _: &rustls::internal::msgs::handshake::DigitallySignedStruct,
+    ) -> Result<rustls::HandshakeSignatureValid, rustls::TLSError> {
+        Ok(rustls::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::Certificate,
+        _: &rustls::internal::msgs::handshake::DigitallySignedStruct,
+    ) -> Result<rustls::HandshakeSignatureValid, rustls::TLSError> {
+        Ok(rustls::HandshakeSignatureValid::assertion())
+    }
+}
+
 const MAX_MSG_LEN: u32 = 1024 * 1024; // 1 MiB
 
 fn connect_proto(host: &str, port: i32) -> Result<MumbleState, io::Error> {
     let mut config = rustls::ClientConfig::new();
     config.root_store.add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
 
+    if !env::var("IGNORE_CERT").is_err() {
+        config.dangerous()
+            .set_certificate_verifier(Arc::new(AcceptAllCertsVerifier{}));
+    }
+    
     let rc_config = Arc::new(config);
     let name_ref = webpki::DNSNameRef::try_from_ascii_str(host).unwrap();
     let mut client = rustls::ClientSession::new(&rc_config, name_ref);
 
     let addr = format!("{}:{}", host, port).to_socket_addrs()?.next().expect("wat?");
-    let mut sock = TcpStream::connect(&addr).unwrap();
+    let mut sock = TcpStream::connect(&addr).expect("Connection failed!");
     println!("sock: {:?}", sock);
 
     let mut state = MumbleState::new();
@@ -186,13 +222,11 @@ impl MumbleState {
 
     fn run(&mut self, buf: &mut BytesMut) -> Result<Option<BytesMut>, io::Error> {
         if self.header.is_none() {
-            self.header = Header::parse(buf).map(|header| {
-                //println!("Parsed header {:?}", header);
-                header
-            });
+            self.header = Header::parse(buf);
         }
         match &self.header {
             Some(header) => {
+                //println!("Parsed header {:?}", header);
                 if buf.len() >= header.message_len as usize {
                     let answer = self.parse_mumble_msg(buf);
                     self.header = None;

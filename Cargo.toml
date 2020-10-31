@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 # needed by mumble client protocol, but the versions are locked by rocket
-rustls = "*"
+rustls = {version = "0.18.1", features = ["dangerous_configuration"]}
 webpki = "*"
 webpki-roots = "*"
 
@@ -17,7 +17,7 @@ prost = "0.6"
 fake_clock = "0.3.0"
 bytes = "0.5.4"
 
-rocket = "0.4.4"
+rocket = "0.4.5"
 rocket_contrib = "0.4.4"
 serde = { version = "1.0.110", features = ["derive"] }
 
