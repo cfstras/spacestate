@@ -49,7 +49,7 @@ impl PingData {
     }
 }
 
-pub fn send_ping(host: &str, port: i32) -> Result<PingData, io::Error> {
+pub fn send_ping(host: &str, port: u16) -> Result<PingData, io::Error> {
     let target = format!("{}:{}", host, port).to_socket_addrs()?.next().expect("wat?");
 
     let socket = UdpSocket::bind("0.0.0.0:0")?;

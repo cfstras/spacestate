@@ -1,4 +1,3 @@
-#![feature(proc_macro_hygiene, decl_macro)]
 
 use crate::mumble_ping::PingData;
 
@@ -7,10 +6,8 @@ use bytes::buf::BufExt;
 use prost::bytes;
 use prost::encoding::encode_varint;
 use prost::Message;
-use rocket_contrib::json::Json;
 use rocket::State;
-use rustls::{Session, ClientSession};
-use serde::Serialize;
+use rocket::serde::{Serialize, json::Json};
 use std::{env, io};
 use std::collections::HashMap;
 use std::io::{Read, Write, ErrorKind};
@@ -18,7 +15,7 @@ use std::net::{TcpStream, ToSocketAddrs, Shutdown};
 use std::process::exit;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-
+use std::convert::TryInto;
 mod mumble_ping;
 
 #[macro_use] extern crate rocket;
@@ -34,17 +31,18 @@ fn index() -> &'static str {
 }
 
 #[get("/ping")]
-fn ping() -> Json<PingData> {
-    Json(mumble_ping::send_ping("mumble.flipdot.org", 64738)
+fn ping(url: &State<(String, u16)>) -> Json<PingData> {
+    Json(mumble_ping::send_ping(&url.0, url.1)
         .unwrap())
 }
 
 #[get("/status")]
-fn status(state: State<Box<MumbleState>>) -> Json<&MumbleState> {
-    Json(state.inner().clone().as_ref())
+fn status(state: &State<Arc<MumbleState>>) -> Json<&MumbleState> {
+    Json(state)
 }
 
-fn main() {
+#[rocket::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
 
     let port = match args.len() {
@@ -62,21 +60,23 @@ fn main() {
         Err(e) => eprintln!("Ping Err: {}", e),
     }
 
-    let rkt = rocket::ignite()
-        .mount("/", routes![index, status]);
+    let rkt = rocket::build()
+        .mount("/", routes![index, status, ping])
+        .manage((host.clone(), port));
 
     let res = connect_proto(host, port);
     let rkt = match res {
         Ok(data) => {
             println!("State finished! {} channels, {} users", data.channels.len(), data.users.len());
-            rkt.manage(Box::new(data))
+            rkt.manage(Arc::new(data))
         }
         Err(e) => {
             eprintln!("Read state err: {}", e);
-            rkt
+            rkt.manage(Arc::new(MumbleState::new()))
         },
     };
-    rkt.launch();
+
+    rkt.launch().await.expect("Error serving HTTP");
 }
 
 #[derive(Debug, Serialize)]
@@ -99,15 +99,17 @@ struct MumbleState {
 }
 
 struct AcceptAllCertsVerifier {}
-impl rustls::ServerCertVerifier for AcceptAllCertsVerifier {
+impl rustls::client::ServerCertVerifier for AcceptAllCertsVerifier {
     fn verify_server_cert(
         &self,
-        _: &rustls::RootCertStore,
+        _: &rustls::Certificate,
         _: &[rustls::Certificate],
-        _: webpki::DNSNameRef,
+        _: &rustls::ServerName,
+        _: &mut dyn Iterator<Item = &[u8]>,
         _: &[u8],
-    ) -> Result<rustls::ServerCertVerified, rustls::TLSError> {
-        return Ok(rustls::ServerCertVerified::assertion());
+        _: SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        return Ok(rustls::client::ServerCertVerified::assertion());
     }
 
     fn verify_tls12_signature(
@@ -115,8 +117,8 @@ impl rustls::ServerCertVerifier for AcceptAllCertsVerifier {
         _: &[u8],
         _: &rustls::Certificate,
         _: &rustls::internal::msgs::handshake::DigitallySignedStruct,
-    ) -> Result<rustls::HandshakeSignatureValid, rustls::TLSError> {
-        Ok(rustls::HandshakeSignatureValid::assertion())
+    ) -> Result<rustls::client::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
@@ -124,16 +126,32 @@ impl rustls::ServerCertVerifier for AcceptAllCertsVerifier {
         _: &[u8],
         _: &rustls::Certificate,
         _: &rustls::internal::msgs::handshake::DigitallySignedStruct,
-    ) -> Result<rustls::HandshakeSignatureValid, rustls::TLSError> {
-        Ok(rustls::HandshakeSignatureValid::assertion())
+    ) -> Result<rustls::client::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::HandshakeSignatureValid::assertion())
     }
 }
 
 const MAX_MSG_LEN: u32 = 1024 * 1024; // 1 MiB
 
-fn connect_proto(host: &str, port: i32) -> Result<MumbleState, io::Error> {
-    let mut config = rustls::ClientConfig::new();
-    config.root_store.add_server_trust_anchors(&webpki_roots::TLS_SERVER_ROOTS);
+fn connect_proto(host: &str, port: u16) -> Result<MumbleState, io::Error> {
+    let mut root_store = rustls::RootCertStore::empty();
+root_store.add_server_trust_anchors(
+    webpki_roots::TLS_SERVER_ROOTS
+        .0
+        .iter()
+        .map(|ta| {
+            rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
+                ta.subject,
+                ta.spki,
+                ta.name_constraints,
+            )
+        })
+);
+
+    let mut config = rustls::ClientConfig::builder()
+        .with_safe_defaults()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
 
     if !env::var("IGNORE_CERT").is_err() {
         config.dangerous()
@@ -141,8 +159,8 @@ fn connect_proto(host: &str, port: i32) -> Result<MumbleState, io::Error> {
     }
     
     let rc_config = Arc::new(config);
-    let name_ref = webpki::DNSNameRef::try_from_ascii_str(host).unwrap();
-    let mut client = rustls::ClientSession::new(&rc_config, name_ref);
+    let mut client = rustls::ClientConnection::new(rc_config, host.try_into().unwrap())
+    .expect("Couldn't create TLS client");
 
     let addr = format!("{}:{}", host, port).to_socket_addrs()?.next().expect("wat?");
     let mut sock = TcpStream::connect(&addr).expect("Connection failed!");
@@ -163,7 +181,7 @@ fn connect_proto(host: &str, port: i32) -> Result<MumbleState, io::Error> {
             .map_err(|f| io::Error::new(io::ErrorKind::Other, f.to_string()))?;
 
 
-        let read = client.read(&mut read_buf2)?;
+        let read = client.reader().read(&mut read_buf2)?;
         read_buf.extend(&read_buf2[..read]);
         //println!("read_buf {}: {:x?}", read_buf.len(), read_buf.to_vec());
 
@@ -171,7 +189,7 @@ fn connect_proto(host: &str, port: i32) -> Result<MumbleState, io::Error> {
             None => {},
             Some(answer) => {
                 println!("answering with {:x?}", answer.to_vec());
-                client.write(&answer)?;
+                client.writer().write(&answer)?;
             },
         }
 
@@ -182,13 +200,13 @@ fn connect_proto(host: &str, port: i32) -> Result<MumbleState, io::Error> {
     }
 }
 
-fn close(mut client: &mut ClientSession, mut sock: &mut TcpStream) -> Result<(), io::Error> {
+fn close(mut client: &mut rustls::ClientConnection, mut sock: &mut TcpStream) -> Result<(), io::Error> {
     client.send_close_notify();
     pull_push_tls(&mut client, &mut sock)?;
     sock.shutdown(Shutdown::Both)
 }
 
-fn pull_push_tls(client: &mut ClientSession, mut sock: &mut TcpStream) -> Result<bool, io::Error> {
+fn pull_push_tls(client: &mut rustls::ClientConnection, mut sock: &mut TcpStream) -> Result<bool, io::Error> {
     if client.wants_write() {
         client.write_tls(&mut sock)?;
     } else if client.wants_read() {
