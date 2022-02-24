@@ -12,7 +12,7 @@ use fake_clock::FakeClock as Instant;
 #[cfg(not(test))]
 use std::time::Instant;
 
-#[derive(Debug, cmp::PartialEq, Serialize)]
+#[derive(Debug, cmp::PartialEq, Serialize, Clone)]
 pub struct PingData {
     version: [i8; 4],
     packet_id: u64,

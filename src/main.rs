@@ -5,6 +5,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use prost::bytes;
 use prost::encoding::encode_varint;
 use prost::Message;
+use rocket::http::{ContentType, Status};
 use rocket::serde::{json::Json, Serialize};
 use rocket::State;
 use std::collections::HashMap;
@@ -13,10 +14,10 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::process::exit;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, io};
-use rocket::http::{Status, ContentType};
-
 mod mumble_ping;
 
 #[macro_use]
@@ -25,6 +26,11 @@ extern crate rocket;
 pub mod mumble {
     use serde::Serialize;
     include!(concat!(env!("OUT_DIR"), "/mumble_proto.rs"));
+}
+
+struct PingState {
+    data: Option<PingData>,
+    time: Instant,
 }
 
 #[get("/")]
@@ -39,8 +45,24 @@ fn index() -> (Status, (ContentType, &'static str)) {
 }
 
 #[get("/ping")]
-fn ping(url: &State<(String, u16)>) -> Json<PingData> {
-    Json(mumble_ping::send_ping(&url.0, url.1).unwrap())
+fn ping(
+    url: &State<(String, u16)>,
+    ping_state: &State<Arc<Mutex<PingState>>>,
+) -> Json<Option<PingData>> {
+    let mut state = ping_state.lock().unwrap();
+    if state.data.is_none() || state.time.elapsed().as_secs() > 2 {
+        match mumble_ping::send_ping(&url.0, url.1) {
+            Err(err) => {
+                println!("Error pinging mumble: {:?}", err);
+                return Json(None);
+            }
+            Ok(data) => {
+                state.data.replace(data);
+                state.time = Instant::now();
+            }
+        }
+    }
+    Json(state.data.clone())
 }
 
 #[get("/status")]
@@ -62,14 +84,10 @@ async fn main() {
     };
     let host = &args[1];
 
-    // match mumble_ping::send_ping(host, port) {
-    //     Ok(data) => println!("{:?}", data),
-    //     Err(e) => eprintln!("Ping Err: {}", e),
-    // }
-
     let mut rkt = rocket::build()
         .mount("/", routes![index, status, ping])
-        .manage((host.clone(), port));
+        .manage((host.clone(), port))
+        .manage(Arc::new(Mutex::new(PingState{time: Instant::now(), data: None})));
 
     let res = connect_proto(host, port);
     let state = match res {
