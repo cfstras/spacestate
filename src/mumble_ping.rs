@@ -90,7 +90,6 @@ pub fn send_ping(host: &str, port: u16) -> Result<PingData, io::Error> {
 #[cfg(test)]
 mod tests {
     use super::PingData;
-    use std::time::Instant;
 
     const RAW: [u8; 24] = [
         0, 1, 3, 0, 139, 162, 102, 131, 242, 120, 10, 6, 0, 0, 0, 4, 0, 0, 0, 200, 0, 4, 147, 224,

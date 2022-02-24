@@ -15,6 +15,8 @@ use std::process::exit;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, io};
+use rocket::http::{Status, ContentType};
+
 mod mumble_ping;
 
 #[macro_use]
@@ -26,8 +28,14 @@ pub mod mumble {
 }
 
 #[get("/")]
-fn index() -> &'static str {
-    "Hello, world!"
+fn index() -> (Status, (ContentType, &'static str)) {
+    let content = "<style>li {font-family: monospace}</style>
+<ul>
+    <li><a href=\"/\">/</a></li>
+    <li><a href=\"/ping\">/ping</a></li>
+    <li><a href=\"/status\">/status</a></li>
+</ul>";
+    (Status::Ok, (ContentType::HTML, content))
 }
 
 #[get("/ping")]
