@@ -1,9 +1,9 @@
-use std::io;
-use std::convert::TryInto;
-use std::net::{ToSocketAddrs, UdpSocket};
-use std::time::{Duration};
-use std::cmp;
 use serde::Serialize;
+use std::cmp;
+use std::convert::TryInto;
+use std::io;
+use std::net::{ToSocketAddrs, UdpSocket};
+use std::time::Duration;
 
 use rand::prelude::*;
 
@@ -19,7 +19,7 @@ pub struct PingData {
     users: i32,
     max_users: i32,
     bandwidth: i32,
-    ping: u64
+    ping: u64,
 }
 
 impl PingData {
@@ -50,7 +50,10 @@ impl PingData {
 }
 
 pub fn send_ping(host: &str, port: u16) -> Result<PingData, io::Error> {
-    let target = format!("{}:{}", host, port).to_socket_addrs()?.next().expect("wat?");
+    let target = format!("{}:{}", host, port)
+        .to_socket_addrs()?
+        .next()
+        .expect("wat?");
 
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -72,7 +75,13 @@ pub fn send_ping(host: &str, port: u16) -> Result<PingData, io::Error> {
 
     let data = PingData::decode(buf, start_date);
     if data.packet_id != packet_id {
-        Err(io::Error::new(io::ErrorKind::Other, format!("packet_id was different: {} != {}", packet_id, data.packet_id)))
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "packet_id was different: {} != {}",
+                packet_id, data.packet_id
+            ),
+        ))
     } else {
         Ok(data)
     }
@@ -80,23 +89,28 @@ pub fn send_ping(host: &str, port: u16) -> Result<PingData, io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
     use super::PingData;
+    use std::time::Instant;
 
-    const RAW: [u8; 24] = [0, 1, 3, 0, 139, 162, 102, 131, 242, 120, 10, 6, 0, 0, 0, 4, 0, 0, 0, 200, 0, 4, 147, 224];
+    const RAW: [u8; 24] = [
+        0, 1, 3, 0, 139, 162, 102, 131, 242, 120, 10, 6, 0, 0, 0, 4, 0, 0, 0, 200, 0, 4, 147, 224,
+    ];
 
     #[test]
     fn test_decode() {
         let clock = fake_clock::FakeClock::now();
         fake_clock::FakeClock::advance_time(23);
         let data = PingData::decode(&RAW, clock);
-        assert_eq!(data, PingData {
-            version: [0, 1, 3, 0],
-            packet_id: 10061717234393811462,
-            users: 4,
-            max_users: 200,
-            bandwidth: 300000,
-            ping: 23
-        })
+        assert_eq!(
+            data,
+            PingData {
+                version: [0, 1, 3, 0],
+                packet_id: 10061717234393811462,
+                users: 4,
+                max_users: 200,
+                bandwidth: 300000,
+                ping: 23
+            }
+        )
     }
 }

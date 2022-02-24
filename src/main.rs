@@ -1,24 +1,24 @@
-
 use crate::mumble_ping::PingData;
 
-use bytes::{Buf, BufMut, BytesMut};
 use bytes::buf::BufExt;
+use bytes::{Buf, BufMut, BytesMut};
 use prost::bytes;
 use prost::encoding::encode_varint;
 use prost::Message;
+use rocket::serde::{json::Json, Serialize};
 use rocket::State;
-use rocket::serde::{Serialize, json::Json};
-use std::{env, io};
 use std::collections::HashMap;
-use std::io::{Read, Write, ErrorKind};
-use std::net::{TcpStream, ToSocketAddrs, Shutdown};
+use std::convert::TryInto;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::process::exit;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::convert::TryInto;
+use std::{env, io};
 mod mumble_ping;
 
-#[macro_use] extern crate rocket;
+#[macro_use]
+extern crate rocket;
 
 pub mod mumble {
     use serde::Serialize;
@@ -32,12 +32,11 @@ fn index() -> &'static str {
 
 #[get("/ping")]
 fn ping(url: &State<(String, u16)>) -> Json<PingData> {
-    Json(mumble_ping::send_ping(&url.0, url.1)
-        .unwrap())
+    Json(mumble_ping::send_ping(&url.0, url.1).unwrap())
 }
 
 #[get("/status")]
-fn status(state: &State<Arc<MumbleState>>) -> Json<&MumbleState> {
+fn status(state: &State<Arc<Option<MumbleState>>>) -> Json<&Option<MumbleState>> {
     Json(state)
 }
 
@@ -55,27 +54,24 @@ async fn main() {
     };
     let host = &args[1];
 
-    match mumble_ping::send_ping(host, port) {
-        Ok(data) => println!("{:?}", data),
-        Err(e) => eprintln!("Ping Err: {}", e),
-    }
+    // match mumble_ping::send_ping(host, port) {
+    //     Ok(data) => println!("{:?}", data),
+    //     Err(e) => eprintln!("Ping Err: {}", e),
+    // }
 
-    let rkt = rocket::build()
+    let mut rkt = rocket::build()
         .mount("/", routes![index, status, ping])
         .manage((host.clone(), port));
 
     let res = connect_proto(host, port);
-    let rkt = match res {
-        Ok(data) => {
-            println!("State finished! {} channels, {} users", data.channels.len(), data.users.len());
-            rkt.manage(Arc::new(data))
-        }
+    let state = match res {
+        Ok(data) => Some(data),
         Err(e) => {
             eprintln!("Read state err: {}", e);
-            rkt.manage(Arc::new(MumbleState::new()))
-        },
+            None
+        }
     };
-
+    rkt = rkt.manage(Arc::new(state));
     rkt.launch().await.expect("Error serving HTTP");
 }
 
@@ -109,7 +105,7 @@ impl rustls::client::ServerCertVerifier for AcceptAllCertsVerifier {
         _: &[u8],
         _: SystemTime,
     ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        return Ok(rustls::client::ServerCertVerified::assertion());
+        Ok(rustls::client::ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -135,34 +131,33 @@ const MAX_MSG_LEN: u32 = 1024 * 1024; // 1 MiB
 
 fn connect_proto(host: &str, port: u16) -> Result<MumbleState, io::Error> {
     let mut root_store = rustls::RootCertStore::empty();
-root_store.add_server_trust_anchors(
-    webpki_roots::TLS_SERVER_ROOTS
-        .0
-        .iter()
-        .map(|ta| {
-            rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                ta.subject,
-                ta.spki,
-                ta.name_constraints,
-            )
-        })
-);
+    root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter().map(|ta| {
+        rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
+            ta.subject,
+            ta.spki,
+            ta.name_constraints,
+        )
+    }));
 
     let mut config = rustls::ClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(root_store)
         .with_no_client_auth();
 
-    if !env::var("IGNORE_CERT").is_err() {
-        config.dangerous()
-            .set_certificate_verifier(Arc::new(AcceptAllCertsVerifier{}));
+    if env::var("IGNORE_CERT").is_ok() {
+        config
+            .dangerous()
+            .set_certificate_verifier(Arc::new(AcceptAllCertsVerifier {}));
     }
-    
+
     let rc_config = Arc::new(config);
     let mut client = rustls::ClientConnection::new(rc_config, host.try_into().unwrap())
-    .expect("Couldn't create TLS client");
+        .expect("Couldn't create TLS client");
 
-    let addr = format!("{}:{}", host, port).to_socket_addrs()?.next().expect("wat?");
+    let addr = format!("{}:{}", host, port)
+        .to_socket_addrs()?
+        .next()
+        .expect("wat?");
     let mut sock = TcpStream::connect(&addr).expect("Connection failed!");
     println!("sock: {:?}", sock);
 
@@ -175,45 +170,58 @@ root_store.add_server_trust_anchors(
         if !pull_push_tls(&mut client, &mut sock)? {
             println!("EOF");
             close(&mut client, &mut sock)?;
-            return Err(io::Error::new(ErrorKind::Other, "EOF before we got all data"));
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                "EOF before we got all data",
+            ));
         }
-        client.process_new_packets()
+        client
+            .process_new_packets()
             .map_err(|f| io::Error::new(io::ErrorKind::Other, f.to_string()))?;
-
 
         let read = client.reader().read(&mut read_buf2)?;
         read_buf.extend(&read_buf2[..read]);
         //println!("read_buf {}: {:x?}", read_buf.len(), read_buf.to_vec());
 
         match state.run(&mut read_buf)? {
-            None => {},
+            None => {}
             Some(answer) => {
                 println!("answering with {:x?}", answer.to_vec());
-                client.writer().write(&answer)?;
-            },
+                client.writer().write_all(&answer)?;
+            }
         }
 
         if state.server_config.is_some() && state.server_sync.is_some() {
             close(&mut client, &mut sock)?;
+
+            println!(
+                "State finished! {} channels, {} users",
+                state.channels.len(),
+                state.users.len()
+            );
             return Ok(state);
         }
     }
 }
 
-fn close(mut client: &mut rustls::ClientConnection, mut sock: &mut TcpStream) -> Result<(), io::Error> {
+fn close(client: &mut rustls::ClientConnection, sock: &mut TcpStream) -> Result<(), io::Error> {
     client.send_close_notify();
-    pull_push_tls(&mut client, &mut sock)?;
+    pull_push_tls(client, sock)?;
     sock.shutdown(Shutdown::Both)
 }
 
-fn pull_push_tls(client: &mut rustls::ClientConnection, mut sock: &mut TcpStream) -> Result<bool, io::Error> {
-    if client.wants_write() {
-        client.write_tls(&mut sock)?;
-    } else if client.wants_read() {
-        let read = client.read_tls(&mut sock)?;
+fn pull_push_tls(
+    client: &mut rustls::ClientConnection,
+    mut socket: &mut TcpStream,
+) -> Result<bool, io::Error> {
+    if client.wants_read() {
+        let read = client.read_tls(&mut socket)?;
         if read == 0 {
-            return Ok(false)
+            return Ok(false);
         }
+    }
+    if client.wants_write() {
+        client.write_tls(&mut socket)?;
     }
     Ok(true)
 }
@@ -225,7 +233,7 @@ impl Header {
         }
         Some(Header {
             message_type: buf.get_u16(),
-            message_len: buf.get_u32()
+            message_len: buf.get_u32(),
         })
     }
 }
@@ -233,8 +241,13 @@ impl Header {
 impl MumbleState {
     fn new() -> MumbleState {
         MumbleState {
-            header: None, channels: Default::default(), users: Default::default(),
-            server_version: None, suggest_config: None, server_sync: None, server_config: None
+            header: None,
+            channels: Default::default(),
+            users: Default::default(),
+            server_version: None,
+            suggest_config: None,
+            server_sync: None,
+            server_config: None,
         }
     }
 
@@ -251,11 +264,14 @@ impl MumbleState {
                     return answer;
                 }
                 if header.message_len > MAX_MSG_LEN {
-                    return Err(io::Error::new(io::ErrorKind::Other, "way too much data... aborting"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "way too much data... aborting",
+                    ));
                 }
                 Ok(None)
             }
-            None => Ok(None)
+            None => Ok(None),
         }
     }
 
@@ -290,40 +306,40 @@ impl MumbleState {
                 let mut resp_buf = MumbleState::response_header(&response, 2);
                 response.encode(&mut resp_buf)?;
                 Ok(Some(resp_buf))
-            },
+            }
             1 => {
                 //let msg = mumble::UdpTunnel::decode(limited_buf)?;
                 println!("message: UdpTunnel {:x?}", limited_buf.bytes());
                 limited_buf.advance(limited_buf.limit());
                 // ignore, cannot parse this
                 Ok(None)
-            },
+            }
             2 => {
                 let msg = mumble::Authenticate::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             3 => {
                 let msg = mumble::Ping::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             4 => {
                 let msg = mumble::Reject::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             5 => {
                 let msg = mumble::ServerSync::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 self.server_sync = Some(msg);
                 Ok(None)
-            },
+            }
             6 => {
                 let msg = mumble::ChannelRemove::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             7 => {
                 let msg = mumble::ChannelState::decode(limited_buf)?;
                 //println!("message: Channel {:#?}", &msg.name.clone().unwrap());
@@ -340,47 +356,46 @@ impl MumbleState {
                 response.encode(&mut resp_buf)?;
                 Ok(Some(resp_buf))*/
                 Ok(None)
-            },
+            }
             8 => {
                 let msg = mumble::UserRemove::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             9 => {
                 let msg = mumble::UserState::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 self.users.insert(msg.session.unwrap(), msg);
                 Ok(None)
-            },
+            }
             10 => {
                 let msg = mumble::BanList::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             11 => {
                 let msg = mumble::TextMessage::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             12 => {
                 let msg = mumble::PermissionDenied::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             13 => {
                 let msg = mumble::Acl::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             14 => {
                 let msg = mumble::QueryUsers::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             15 => {
                 let msg = mumble::CryptSetup::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
-
 
                 let response = mumble::Version {
                     version: Some(99u32),
@@ -392,79 +407,84 @@ impl MumbleState {
                 let mut resp_buf = MumbleState::response_header(&response, 0);
                 response.encode(&mut resp_buf)?;
                 Ok(Some(resp_buf))
-            },
+            }
             16 => {
                 let msg = mumble::ContextActionModify::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             17 => {
                 let msg = mumble::ContextAction::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             18 => {
                 let msg = mumble::UserList::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             19 => {
                 let msg = mumble::VoiceTarget::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             20 => {
                 let msg = mumble::PermissionQuery::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             21 => {
                 let msg = mumble::CodecVersion::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
-                
+
                 let mut udp_tunnel_buf = BytesMut::with_capacity(1 + 10); // maxlen 64-bit varint
+                #[allow(clippy::unusual_byte_groupings)]
                 udp_tunnel_buf.put_u8(0b001_00000); // ping packet, normal talking
-                encode_varint(SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("time failed").as_millis() as u64, 
-                    &mut udp_tunnel_buf);
+                encode_varint(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("time failed")
+                        .as_millis() as u64,
+                    &mut udp_tunnel_buf,
+                );
                 // 60 81 10 0
                 //let raw: &[u8] = &[0x60, 0x0, 0x69, 0x7f, 0x7c, 0xf5, 0xe8, 0xa7, 0xad, 0xb8, 0x62, 0x1b, 0x73, 0x5, 0xd5, 0x84, 0x3, 0xe7, 0x1a, 0x7f, 0xdc, 0xdf, 0x26, 0xf8, 0x44, 0x2b, 0x24, 0x13, 0xc0, 0x77, 0x4d, 0x38, 0x10, 0x7e, 0x37, 0xe5, 0xbd, 0xb7, 0x97, 0x0, 0xde, 0x12, 0xa0, 0x73, 0x4d, 0x46, 0xcd, 0xc2, 0x8, 0x52, 0x92, 0x15, 0xe7, 0xe8, 0x80, 0x0, 0x1, 0x5c, 0x56, 0xec, 0xd9, 0xf8, 0x68, 0xbd, 0xf3, 0x6c, 0x17, 0x54, 0x57, 0x41, 0x22, 0x5d, 0xe7, 0xd5, 0x11, 0xc1, 0xea, 0x13, 0x44, 0x70, 0x3, 0x8e, 0xa4, 0x9b, 0x77, 0x59, 0x8c, 0x71, 0xe2, 0x7a, 0x2, 0xf5, 0xe, 0xd0, 0x46, 0x38, 0xf6, 0xaa, 0xe7, 0x7c, 0xbd, 0x1, 0xf4, 0x73, 0xab, 0x47, 0x58, 0xc4];
                 //udp_tunnel_buf.put(raw);
-                    
+
                 let encoded_len = udp_tunnel_buf.len();
                 let mut resp_buf = BytesMut::with_capacity(6 + encoded_len);
                 resp_buf.put_u16(1); // UdpTunnel
                 resp_buf.put_u32(encoded_len as u32);
                 resp_buf.put(udp_tunnel_buf);
-                
+
                 Ok(Some(resp_buf))
-            },
+            }
             22 => {
                 let msg = mumble::UserStats::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             23 => {
                 let msg = mumble::RequestBlob::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 Ok(None)
-            },
+            }
             24 => {
                 let msg = mumble::ServerConfig::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 self.server_config = Some(msg);
                 Ok(None)
-            },
+            }
             25 => {
                 let msg = mumble::SuggestConfig::decode(limited_buf)?;
                 println!("message: {:#?}", msg);
                 self.suggest_config = Some(msg);
                 Ok(None)
-            },
-            unknown => {
-                Err(io::Error::new(io::ErrorKind::Other, format!("unknown type {}", unknown)))
             }
+            unknown => Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("unknown type {}", unknown),
+            )),
         }
     }
 }
