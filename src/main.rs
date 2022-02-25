@@ -1,5 +1,6 @@
 use crate::mumble_ping::PingData;
 
+use anyhow::{anyhow, Context, Result};
 use bytes::buf::BufExt;
 use bytes::{Buf, BufMut, BytesMut};
 use prost::bytes;
@@ -18,7 +19,6 @@ use std::sync::Mutex;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, io};
-use anyhow::{Context, Result, anyhow};
 
 mod mumble_ping;
 
@@ -29,10 +29,24 @@ pub mod mumble {
     use serde::Serialize;
     include!(concat!(env!("OUT_DIR"), "/mumble_proto.rs"));
 }
+#[derive(Serialize, Clone)]
+struct Refresh<D> {
+    data: Option<D>,
+    #[serde(with = "instant_elapsed")]
+    time_since_refresh: Instant,
+}
+mod instant_elapsed {
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::{Instant, SystemTime};
 
-struct PingState {
-    data: Option<PingData>,
-    time: Instant,
+    pub fn serialize<S>(instant: &Instant, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let duration = instant.elapsed();
+        duration.serialize(serializer)
+    }
 }
 
 #[get("/")]
@@ -49,10 +63,10 @@ fn index() -> (Status, (ContentType, &'static str)) {
 #[get("/ping")]
 fn ping(
     url: &State<(String, u16)>,
-    ping_state: &State<Arc<Mutex<PingState>>>,
-) -> Json<Option<PingData>> {
+    ping_state: &State<Arc<Mutex<Refresh<PingData>>>>,
+) -> Json<Option<Refresh<PingData>>> {
     let mut state = ping_state.lock().unwrap();
-    if state.data.is_none() || state.time.elapsed().as_secs() > 2 {
+    if state.data.is_none() || state.time_since_refresh.elapsed().as_secs() > 2 {
         match mumble_ping::send_ping(&url.0, url.1) {
             Err(err) => {
                 println!("Error pinging mumble: {:?}", err);
@@ -60,16 +74,16 @@ fn ping(
             }
             Ok(data) => {
                 state.data.replace(data);
-                state.time = Instant::now();
+                state.time_since_refresh = Instant::now();
             }
         }
     }
-    Json(state.data.clone())
+    Json(Some(state.clone()))
 }
 
 #[get("/status")]
-fn status(state: &State<Arc<Option<MumbleState>>>) -> Json<&Option<MumbleState>> {
-    Json(state)
+fn status(url: &State<(String, u16)>) -> Json<MumbleState> {
+    Json(connect_proto(&url.0, url.1).unwrap())
 }
 
 #[rocket::main]
@@ -86,20 +100,18 @@ async fn main() {
     };
     let host = &args[1];
 
-    let mut rkt = rocket::build()
+    let rkt = rocket::build()
         .mount("/", routes![index, status, ping])
-        .manage((host.clone(), port))
-        .manage(Arc::new(Mutex::new(PingState{time: Instant::now(), data: None})));
+        .manage((host.clone() as String, port as u16))
+        .manage(Arc::new(Mutex::new(Refresh::<PingData> {
+            time_since_refresh: Instant::now(),
+            data: None,
+        })))
+        .manage(Arc::new(Mutex::new(Refresh::<MumbleState> {
+            time_since_refresh: Instant::now(),
+            data: None,
+        })));
 
-    let res = connect_proto(host, port);
-    let state = match res {
-        Ok(data) => Some(data),
-        Err(e) => {
-            eprintln!("Read state err: {}", e);
-            None
-        }
-    };
-    rkt = rkt.manage(Arc::new(state));
     rkt.launch().await.expect("Error serving HTTP");
 }
 

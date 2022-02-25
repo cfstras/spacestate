@@ -1,9 +1,9 @@
+use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 use std::cmp;
 use std::convert::TryInto;
-use std::net::{ToSocketAddrs, UdpSocket, SocketAddr};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
-use anyhow::{Context, Result, anyhow};
 
 use rand::prelude::*;
 
@@ -58,10 +58,10 @@ pub fn send_ping(host: &str, port: u16) -> Result<PingData> {
         .next()
         .expect("No IPv4 address for this hostname");
 
-    let socket = UdpSocket::bind("0.0.0.0:0")
-    .context("unable to open UDP socket")?;
-    socket.set_read_timeout(Some(Duration::from_secs(2)))
-    .context("could not set socket timeout")?;
+    let socket = UdpSocket::bind("0.0.0.0:0").context("unable to open UDP socket")?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .context("could not set socket timeout")?;
 
     let mut rng = rand::thread_rng();
     // random id as packet id
@@ -70,23 +70,25 @@ pub fn send_ping(host: &str, port: u16) -> Result<PingData> {
 
     //println!("Sending {:?}", ping);
     let start_date = Instant::now();
-    socket.send_to(&ping, target)
-    .context("could not send ping packet")?;
+    socket
+        .send_to(&ping, target)
+        .context("could not send ping packet")?;
     //println!("Sent {} bytes", sent);
 
     let mut buf = [0; 24];
-    let (num_bytes, _src) = socket.recv_from(&mut buf)
-    .context("did not receive ping response")?;
+    let (num_bytes, _src) = socket
+        .recv_from(&mut buf)
+        .context("did not receive ping response")?;
     let buf = &mut buf[..num_bytes];
     //println!("Received {} bytes: {:?}", num_bytes, buf);
 
     let data = PingData::decode(buf, start_date);
     if data.packet_id != packet_id {
         Err(anyhow!(
-                "packet_id was different: {} != {}",
-                packet_id, data.packet_id
-            )
-        )
+            "packet_id was different: {} != {}",
+            packet_id,
+            data.packet_id
+        ))
     } else {
         Ok(data)
     }
