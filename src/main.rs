@@ -18,6 +18,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, io};
+use anyhow::{Context, Result, anyhow};
+
 mod mumble_ping;
 
 #[macro_use]
@@ -155,7 +157,7 @@ impl rustls::client::ServerCertVerifier for AcceptAllCertsVerifier {
 
 const MAX_MSG_LEN: u32 = 1024 * 1024; // 1 MiB
 
-fn connect_proto(host: &str, port: u16) -> Result<MumbleState, io::Error> {
+fn connect_proto(host: &str, port: u16) -> Result<MumbleState> {
     let mut root_store = rustls::RootCertStore::empty();
     root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter().map(|ta| {
         rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
@@ -177,15 +179,17 @@ fn connect_proto(host: &str, port: u16) -> Result<MumbleState, io::Error> {
     }
 
     let rc_config = Arc::new(config);
-    let mut client = rustls::ClientConnection::new(rc_config, host.try_into().unwrap())
-        .expect("Couldn't create TLS client");
+    let mut client = rustls::ClientSession::new(rc_config, host.try_into().unwrap())
+        .context("Couldn't create TLS client")?;
 
     let addr = format!("{}:{}", host, port)
         .to_socket_addrs()?
         .next()
         .expect("wat?");
-    let mut sock = TcpStream::connect(&addr).expect("Connection failed!");
+    let mut sock = TcpStream::connect(&addr).context("Connection failed!")?;
     println!("sock: {:?}", sock);
+
+    let mut tls = rustls::Stream::new(&mut client, &mut sock);
 
     let mut state = MumbleState::new();
 
@@ -193,19 +197,7 @@ fn connect_proto(host: &str, port: u16) -> Result<MumbleState, io::Error> {
     let mut read_buf2 = [0; 512];
 
     loop {
-        if !pull_push_tls(&mut client, &mut sock)? {
-            println!("EOF");
-            close(&mut client, &mut sock)?;
-            return Err(io::Error::new(
-                ErrorKind::Other,
-                "EOF before we got all data",
-            ));
-        }
-        client
-            .process_new_packets()
-            .map_err(|f| io::Error::new(io::ErrorKind::Other, f.to_string()))?;
-
-        let read = client.reader().read(&mut read_buf2)?;
+        let read = tls.read(&mut read_buf2)?;
         read_buf.extend(&read_buf2[..read]);
         //println!("read_buf {}: {:x?}", read_buf.len(), read_buf.to_vec());
 
@@ -213,12 +205,12 @@ fn connect_proto(host: &str, port: u16) -> Result<MumbleState, io::Error> {
             None => {}
             Some(answer) => {
                 println!("answering with {:x?}", answer.to_vec());
-                client.writer().write_all(&answer)?;
+                tls.write_all(&answer)?;
             }
         }
 
         if state.server_config.is_some() && state.server_sync.is_some() {
-            close(&mut client, &mut sock)?;
+            close(&mut client, &mut sock).context("error closing stream")?;
 
             println!(
                 "State finished! {} channels, {} users",
@@ -230,26 +222,10 @@ fn connect_proto(host: &str, port: u16) -> Result<MumbleState, io::Error> {
     }
 }
 
-fn close(client: &mut rustls::ClientConnection, sock: &mut TcpStream) -> Result<(), io::Error> {
+fn close(client: &mut rustls::ClientSession, sock: &mut TcpStream) -> Result<(), io::Error> {
     client.send_close_notify();
-    pull_push_tls(client, sock)?;
-    sock.shutdown(Shutdown::Both)
-}
-
-fn pull_push_tls(
-    client: &mut rustls::ClientConnection,
-    mut socket: &mut TcpStream,
-) -> Result<bool, io::Error> {
-    if client.wants_read() {
-        let read = client.read_tls(&mut socket)?;
-        if read == 0 {
-            return Ok(false);
-        }
-    }
-    if client.wants_write() {
-        client.write_tls(&mut socket)?;
-    }
-    Ok(true)
+    //sock.shutdown(Shutdown::Both)
+    Ok(())
 }
 
 impl Header {
