@@ -8,11 +8,13 @@ use prost::encoding::encode_varint;
 use prost::Message;
 use rocket::http::{ContentType, Status};
 use rocket::serde::{json::Json, Serialize};
+use rocket::tokio::task::spawn_blocking;
 use rocket::State;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::ops::Deref;
 use std::process::exit;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -59,13 +61,14 @@ fn index() -> (Status, (ContentType, &'static str)) {
     (Status::Ok, (ContentType::HTML, content))
 }
 
+#[derive(Clone)]
 struct SharedRefresh<D> {
     content: Arc<Mutex<Refresh<D>>>,
 }
 
 impl<D> SharedRefresh<D>
 where
-    D: Clone,
+    D: Clone + Send,
 {
     fn new() -> SharedRefresh<D> {
         SharedRefresh {
@@ -95,20 +98,30 @@ where
 }
 
 #[get("/ping")]
-fn ping(
+async fn ping(
     url: &State<(String, u16)>,
     ping_state: &State<SharedRefresh<PingData>>,
 ) -> Json<Option<Refresh<PingData>>> {
-    let result = ping_state.refresh(&|| mumble_ping::send_ping(&url.0, url.1), 5);
+    let url = url.inner().clone();
+    let ping_state = ping_state.inner().clone();
+    let result =
+        spawn_blocking(move || ping_state.refresh(&|| mumble_ping::send_ping(&url.0, url.1), 5))
+            .await
+            .unwrap();
+
     Json(result)
 }
 
 #[get("/status")]
-fn status(
+async fn status(
     url: &State<(String, u16)>,
     mumble_state: &State<SharedRefresh<MumbleState>>,
 ) -> Json<Option<Refresh<MumbleState>>> {
-    let result = mumble_state.refresh(&|| connect_proto(&url.0, url.1), 60);
+    let url = url.inner().clone();
+    let mumble_state = mumble_state.inner().clone();
+    let result = spawn_blocking(move || mumble_state.refresh(&|| connect_proto(&url.0, url.1), 60))
+        .await
+        .unwrap();
     Json(result)
 }
 
