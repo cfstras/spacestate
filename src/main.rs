@@ -11,8 +11,8 @@ use rocket::serde::{json::Json, Serialize};
 use rocket::State;
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::io::{ErrorKind, Read, Write};
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::process::exit;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -35,17 +35,16 @@ struct Refresh<D> {
     #[serde(with = "instant_elapsed")]
     time_since_refresh: Instant,
 }
+
 mod instant_elapsed {
-    use serde::de::Error;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::time::{Instant, SystemTime};
+    use serde::{Serialize, Serializer};
+    use std::time::Instant;
 
     pub fn serialize<S>(instant: &Instant, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let duration = instant.elapsed();
-        duration.serialize(serializer)
+        instant.elapsed().as_secs().serialize(serializer)
     }
 }
 
@@ -60,30 +59,57 @@ fn index() -> (Status, (ContentType, &'static str)) {
     (Status::Ok, (ContentType::HTML, content))
 }
 
+struct SharedRefresh<D> {
+    content: Arc<Mutex<Refresh<D>>>,
+}
+
+impl<D> SharedRefresh<D>
+where
+    D: Clone,
+{
+    fn new() -> SharedRefresh<D> {
+        SharedRefresh {
+            content: Arc::new(Mutex::new(Refresh::<D> {
+                time_since_refresh: Instant::now(),
+                data: None,
+            })),
+        }
+    }
+
+    fn refresh(&self, fetch: &dyn Fn() -> Result<D>, max_secs: u64) -> Option<Refresh<D>> {
+        let mut state = self.content.lock().unwrap();
+        if state.data.is_none() || state.time_since_refresh.elapsed().as_secs() > max_secs {
+            match fetch() {
+                Err(err) => {
+                    println!("Error getting data: {:?}", err);
+                    return None;
+                }
+                Ok(data) => {
+                    state.data.replace(data);
+                    state.time_since_refresh = Instant::now();
+                }
+            }
+        }
+        Some(state.clone())
+    }
+}
+
 #[get("/ping")]
 fn ping(
     url: &State<(String, u16)>,
-    ping_state: &State<Arc<Mutex<Refresh<PingData>>>>,
+    ping_state: &State<SharedRefresh<PingData>>,
 ) -> Json<Option<Refresh<PingData>>> {
-    let mut state = ping_state.lock().unwrap();
-    if state.data.is_none() || state.time_since_refresh.elapsed().as_secs() > 2 {
-        match mumble_ping::send_ping(&url.0, url.1) {
-            Err(err) => {
-                println!("Error pinging mumble: {:?}", err);
-                return Json(None);
-            }
-            Ok(data) => {
-                state.data.replace(data);
-                state.time_since_refresh = Instant::now();
-            }
-        }
-    }
-    Json(Some(state.clone()))
+    let result = ping_state.refresh(&|| mumble_ping::send_ping(&url.0, url.1), 5);
+    Json(result)
 }
 
 #[get("/status")]
-fn status(url: &State<(String, u16)>) -> Json<MumbleState> {
-    Json(connect_proto(&url.0, url.1).unwrap())
+fn status(
+    url: &State<(String, u16)>,
+    mumble_state: &State<SharedRefresh<MumbleState>>,
+) -> Json<Option<Refresh<MumbleState>>> {
+    let result = mumble_state.refresh(&|| connect_proto(&url.0, url.1), 60);
+    Json(result)
 }
 
 #[rocket::main]
@@ -103,25 +129,19 @@ async fn main() {
     let rkt = rocket::build()
         .mount("/", routes![index, status, ping])
         .manage((host.clone() as String, port as u16))
-        .manage(Arc::new(Mutex::new(Refresh::<PingData> {
-            time_since_refresh: Instant::now(),
-            data: None,
-        })))
-        .manage(Arc::new(Mutex::new(Refresh::<MumbleState> {
-            time_since_refresh: Instant::now(),
-            data: None,
-        })));
+        .manage(SharedRefresh::<PingData>::new())
+        .manage(SharedRefresh::<MumbleState>::new());
 
     rkt.launch().await.expect("Error serving HTTP");
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct Header {
     message_type: u16,
     message_len: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct MumbleState {
     header: Option<Header>,
 
@@ -191,7 +211,7 @@ fn connect_proto(host: &str, port: u16) -> Result<MumbleState> {
     }
 
     let rc_config = Arc::new(config);
-    let mut client = rustls::ClientSession::new(rc_config, host.try_into().unwrap())
+    let mut client = rustls::ClientConnection::new(rc_config, host.try_into().unwrap())
         .context("Couldn't create TLS client")?;
 
     let addr = format!("{}:{}", host, port)
@@ -234,7 +254,7 @@ fn connect_proto(host: &str, port: u16) -> Result<MumbleState> {
     }
 }
 
-fn close(client: &mut rustls::ClientSession, sock: &mut TcpStream) -> Result<(), io::Error> {
+fn close(client: &mut rustls::ClientConnection, sock: &mut TcpStream) -> Result<(), io::Error> {
     client.send_close_notify();
     //sock.shutdown(Shutdown::Both)
     Ok(())
