@@ -20,6 +20,7 @@ bytes = "0.5.4"
 rocket = {version = "0.5.0-rc.1", features = ["json"]}
 serde = { version = "1.0.110", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
+anyhow = "1.0.55"
 
 [build-dependencies]
 prost-build = "0.6"

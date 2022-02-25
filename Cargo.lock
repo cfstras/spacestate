@@ -1239,6 +1239,7 @@ dependencies = [
 name = "spacestate"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes 0.5.6",
  "fake_clock",
  "prost",
