@@ -10,6 +10,15 @@ cargo run -- $server_hostname [$port]
 
 Running the main binary will start an HTTP server at 127.0.0.1:8000.
 
+## Configuration
+
+You can use these environment variables to configure the HTTP server, or by saving a `Rocket.toml` according to the [Rocket configuration guide](https://rocket.rs/v0.5/guide/configuration/) in your working directory.
+
+```bash
+export ROCKET_ADDRESS="0.0.0.0"
+export ROCKET_PORT=8000
+```
+
 ## Status
 
 Two methods are used:
