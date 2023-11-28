@@ -1,7 +1,6 @@
 use crate::mumble_ping::PingData;
 
-use anyhow::{anyhow, Context, Result};
-use bytes::buf::BufExt;
+use anyhow::{Context, Result};
 use bytes::{Buf, BufMut, BytesMut};
 use prost::bytes;
 use prost::encoding::encode_varint;
@@ -14,7 +13,6 @@ use std::collections::HashMap;
 use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::ops::Deref;
 use std::process::exit;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -180,31 +178,13 @@ impl rustls::client::ServerCertVerifier for AcceptAllCertsVerifier {
     ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
         Ok(rustls::client::ServerCertVerified::assertion())
     }
-
-    fn verify_tls12_signature(
-        &self,
-        _: &[u8],
-        _: &rustls::Certificate,
-        _: &rustls::internal::msgs::handshake::DigitallySignedStruct,
-    ) -> Result<rustls::client::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _: &[u8],
-        _: &rustls::Certificate,
-        _: &rustls::internal::msgs::handshake::DigitallySignedStruct,
-    ) -> Result<rustls::client::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::HandshakeSignatureValid::assertion())
-    }
 }
 
 const MAX_MSG_LEN: u32 = 1024 * 1024; // 1 MiB
 
 fn connect_proto(host: &str, port: u16) -> Result<MumbleState> {
     let mut root_store = rustls::RootCertStore::empty();
-    root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.iter().map(|ta| {
+    root_store.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
         rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
             ta.subject,
             ta.spki,
@@ -356,7 +336,7 @@ impl MumbleState {
             }
             1 => {
                 //let msg = mumble::UdpTunnel::decode(limited_buf)?;
-                println!("message: UdpTunnel {:x?}", limited_buf.bytes());
+                println!("message: UdpTunnel {:x?}", limited_buf);
                 limited_buf.advance(limited_buf.limit());
                 // ignore, cannot parse this
                 Ok(None)
