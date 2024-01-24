@@ -12,7 +12,7 @@ jobs:
     
     - uses: Swatinem/rust-cache@v2
     - name: Preconditions
-      run: apt-get update && apt-get install --no-install-recommends -y protobuf-compiler
+      run: sudo apt-get update && sudo apt-get install --no-install-recommends -y protobuf-compiler
 
     - name: Build
       run: cargo build --release
